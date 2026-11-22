@@ -1,0 +1,793 @@
+"""The settings window: a right-hand sidebar and five pages. Every change is
+applied and saved immediately (no OK/Apply buttons)."""
+import os
+import threading
+
+from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFileDialog, QFrame, QHBoxLayout,
+                               QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
+                               QRadioButton, QScrollArea, QStackedWidget, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
+
+from .. import autostart, devices, modelstore
+from ..branding import (APP_DESCRIPTION, APP_NAME, APP_TAGLINE, APP_VERSION, AUTHOR, GITHUB,
+                        GITHUB_LABEL, LICENSE_NAME, WEBSITE, WEBSITE_LABEL)
+from ..hotkey import check_combo
+from ..paths import MODELS_DIR, NOTICE_PATH
+from ..audio import default_input_name, input_devices, is_bluetooth
+from .icons import LOGO_SVG, line_icon, logo_icon, svg_pixmap
+from .theme import c, fa
+from .widgets import (Card, KeyCaps, LevelMeter, SegmentedControl, SettingRow, ToggleSwitch,
+                      combo_text, device_label, label, ltr, rtl, set_msg)
+
+ABOUT_TEXT = [
+    "MD-TalkType گفتار فارسی را در هر برنامه‌ای به متن تبدیل می‌کند. کلید میان‌بر را "
+    "نگه دارید، صحبت کنید و رها کنید؛ متن همان‌جایی نوشته می‌شود که مکان‌نما هست، چه در Word "
+    "و مرورگر، چه در تلگرام یا هر برنامه‌ی دیگری.",
+    "کلمات همان‌طور که گفته‌اید نوشته می‌شوند و فقط املا، نیم‌فاصله و علائم نگارشی مرتب می‌شود.",
+    "تبدیل گفتار کاملاً روی کامپیوتر خودتان انجام می‌شود؛ صدای شما به هیچ سروری فرستاده "
+    "نمی‌شود و جایی ذخیره نمی‌شود.",
+    "این برنامه متن‌باز است و کد آن در گیت‌هاب در دسترس همه است.",
+]
+
+CREDITS = [
+    ("مدل گفتار", "Whisper از OpenAI، نسخه‌ی فارسی AmirMohseni", "Apache-2.0"),
+    ("موتور تبدیل", "faster-whisper، CTranslate2 و whisper.cpp", "MIT"),
+    ("رابط کاربری", "Qt و PySide6", "LGPL-3.0"),
+    ("قلم", "وزیرمتن، طراحی زنده‌یاد صابر راستی‌کردار", "OFL-1.1"),
+    ("واژه‌های نیم‌فاصله", "Hazm و Common Voice", "MIT / CC0"),
+]
+
+PAGES = [("general", "general", "عمومی"), ("mic", "mic", "میکروفون"),
+         ("text", "text", "متن و املا"), ("model", "model", "مدل گفتار"),
+         ("about", "info", "درباره‌ی برنامه")]
+
+
+def nav_icon(name):
+    icon = QIcon()
+    for s in (18, 24, 36):
+        icon.addPixmap(line_icon(name, c("muted")).pixmap(s, s), QIcon.Normal, QIcon.Off)
+        icon.addPixmap(line_icon(name, c("primary")).pixmap(s, s), QIcon.Normal, QIcon.On)
+    return icon
+
+
+class SettingsWindow(QWidget):
+    hotkey_captured = Signal(object)
+    import_finished = Signal(object, object)  # model id, error
+
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+        self.setObjectName("Window")
+        self.setWindowTitle(f"تنظیمات {APP_NAME}")
+        self.setWindowIcon(logo_icon())
+        self.setLayoutDirection(Qt.RightToLeft)
+        self.resize(940, 660)
+        self.setMinimumSize(820, 560)
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(self._sidebar())
+        self.stack = QStackedWidget()
+        root.addWidget(self.stack, 1)
+        self.pages = {}
+        for key, _, _ in PAGES:
+            page = getattr(self, f"_page_{key}")()
+            self.pages[key] = page
+            self.stack.addWidget(page)
+        self.stack.currentChanged.connect(self._page_changed)
+
+        self._meter_timer = QTimer(self)
+        self._meter_timer.setInterval(40)
+        self._meter_timer.timeout.connect(lambda: self.meter.set_level(self.app.recorder.level))
+        self.hotkey_captured.connect(self._hotkey_captured)
+        self.import_finished.connect(self._import_finished)
+        app.engine_status_changed.connect(self._refresh_model)
+        app.devices_changed.connect(self._refresh_devices)
+        self.show_page("general")
+
+    # ----- frame -----
+    def _sidebar(self):
+        side = QFrame()
+        side.setObjectName("Sidebar")
+        side.setFixedWidth(236)
+        col = QVBoxLayout(side)
+        col.setContentsMargins(16, 22, 16, 16)
+        col.setSpacing(4)
+        head = QHBoxLayout()
+        logo = QLabel()
+        logo.setPixmap(svg_pixmap(LOGO_SVG, 44, self.devicePixelRatioF()))
+        head.addWidget(logo)
+        names = QVBoxLayout()
+        names.setSpacing(0)
+        names.addWidget(label(rtl(APP_NAME), "AppName"))
+        names.addWidget(label(APP_TAGLINE, "AppTagline"))
+        head.addLayout(names, 1)
+        col.addLayout(head)
+        col.addSpacing(20)
+        self.nav = QButtonGroup(self)
+        self.nav_buttons = {}
+        for key, icon, text in PAGES:
+            b = QPushButton(text)
+            b.setObjectName("Nav")
+            b.setCheckable(True)
+            b.setIcon(nav_icon(icon))
+            b.setIconSize(QSize(20, 20))
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, k=key: self.show_page(k))
+            self.nav.addButton(b)
+            self.nav_buttons[key] = b
+            col.addWidget(b)
+        col.addStretch(1)
+        col.addWidget(label(f"نسخه‌ی {fa(APP_VERSION)}", "Faint"))
+        return side
+
+    def _page(self, title, subtitle):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        body = QWidget()
+        col = QVBoxLayout(body)
+        col.setContentsMargins(32, 28, 32, 28)
+        col.setSpacing(14)
+        col.addWidget(label(title, "PageTitle"))
+        col.addWidget(label(subtitle, "PageSubtitle", wrap=True))
+        col.addSpacing(6)
+        scroll.setWidget(body)
+        scroll.col = col
+        return scroll
+
+    def show_page(self, key):
+        self.nav_buttons[key].setChecked(True)
+        self.stack.setCurrentWidget(self.pages[key])
+
+    def _page_changed(self, _):
+        self._update_monitoring()
+
+    def _update_monitoring(self):
+        on = self.isVisible() and self.stack.currentWidget() is self.pages.get("mic")
+        self.app.recorder.monitor(on)
+        (self._meter_timer.start if on else self._meter_timer.stop)()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._refresh_devices()
+        self._refresh_model()
+        self.autostart_switch.setChecked(autostart.is_enabled())
+        self._update_monitoring()
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self._update_monitoring()
+        if self.app.hotkey:
+            self.app.hotkey.end_capture()
+
+    def closeEvent(self, e):
+        e.ignore()  # the app lives in the tray; closing only hides the window
+        self.hide()
+
+    # ----- general -----
+    def _page_general(self):
+        page = self._page("عمومی", "کلید میان‌بر، شیوه‌ی ضبط و رفتار برنامه.")
+        cfg = self.app.cfg
+
+        card = Card("کلید میان‌بر", "این کلید را در هر برنامه‌ای نگه دارید و صحبت کنید؛ "
+                                    "با رها کردنش، متن همان‌جا نوشته می‌شود.")
+        row = QHBoxLayout()
+        self.keycaps = KeyCaps(cfg.hotkey)
+        row.addWidget(self.keycaps, 1)
+        self.change_key = QPushButton("تغییر کلید")
+        self.change_key.setIcon(line_icon("keyboard", c("text")))
+        self.change_key.setCursor(Qt.PointingHandCursor)
+        self.change_key.clicked.connect(self._toggle_capture)
+        row.addWidget(self.change_key)
+        card.add(row)
+        self.key_msg = label("", "Hint", wrap=True)
+        set_msg(self.key_msg, "")
+        card.add(self.key_msg)
+        page.col.addWidget(card)
+
+        card = Card("شیوه‌ی ضبط")
+        self.mode = SegmentedControl([("hold", "نگه داشتن کلید"), ("toggle", "یک بار زدن")],
+                                     cfg.record_mode)
+        self.mode.changed.connect(self._mode_changed)
+        card.add(self.mode)
+        self.mode_text = label("", "CardText", wrap=True)
+        card.add(self.mode_text)
+        self._mode_changed(cfg.record_mode, save=False)
+        page.col.addWidget(card)
+
+        card = Card("رفتار برنامه")
+        self.autostart_switch = ToggleSwitch(autostart.is_enabled())
+        self.autostart_switch.toggled.connect(self._autostart)
+        card.add(SettingRow("اجرا با شروع ویندوز", "برنامه در پس‌زمینه آماده می‌ماند.",
+                            self.autostart_switch))
+        card.separator()
+        card.add(self._switch_row("صدای شروع و پایان", "بوق کوتاه هنگام شروع و پایان ضبط.", "sounds"))
+        card.separator()
+        card.add(self._switch_row("نوار ضبط", "نمایش وضعیت ضبط در پایین صفحه.", "show_overlay"))
+        card.separator()
+        card.add(self._switch_row("ذخیره‌ی تاریخچه", "متن‌های دیکته‌شده روی همین کامپیوتر نگه داشته "
+                                                    "می‌شوند.", "save_history"))
+        page.col.addWidget(card)
+
+        card = Card("کاهش صدای خروجی هنگام ضبط",
+                    "ویژه‌ی کلاس‌های آنلاین و جلسات: هنگام فشردن کلید ضبط، صدای بلندگوی سیستم "
+                    "موقتاً کم یا قطع می‌شود تا با صدای میکروفون تداخل پیدا نکند.")
+        self.duck_switch = ToggleSwitch(bool(cfg.duck_audio))
+        self.duck_switch.toggled.connect(self._duck_toggled)
+        card.add(SettingRow("کاهش خودکار صدای ویندوز",
+                            "هنگام ضبط گفتار، صدای بلندگو/هدفون کم یا قطع می‌شود.",
+                            self.duck_switch))
+        card.separator()
+        self.duck_level_container = QWidget()
+        duck_layout = QVBoxLayout(self.duck_level_container)
+        duck_layout.setContentsMargins(0, 0, 0, 0)
+        duck_layout.setSpacing(8)
+        duck_layout.addWidget(label("میزان بلندی صدا در حین ضبط:", "CardText"))
+        duck_levels = [("0", "قطع کامل (بی‌صدا)"), ("10", "۱۰٪"), ("20", "۲۰٪"), ("35", "۳۵٪")]
+        self.duck_seg = SegmentedControl(duck_levels, str(cfg.duck_level))
+        self.duck_seg.changed.connect(lambda v: self.app.update_config(duck_level=int(v)))
+        duck_layout.addWidget(self.duck_seg)
+        card.add(self.duck_level_container)
+        self.duck_level_container.setVisible(bool(cfg.duck_audio))
+        page.col.addWidget(card)
+
+        card = Card("ظاهر")
+        seg = SegmentedControl([("system", "مطابق ویندوز"), ("light", "روشن"), ("dark", "تیره")],
+                               cfg.theme)
+        seg.changed.connect(lambda v: self.app.update_config(theme=v))
+        card.add(seg)
+        page.col.addWidget(card)
+        page.col.addStretch(1)
+        return page
+
+    def _switch_row(self, title, text, field):
+        sw = ToggleSwitch(bool(getattr(self.app.cfg, field)))
+        sw.toggled.connect(lambda on: self.app.update_config(**{field: on}))
+        return SettingRow(title, text, sw)
+
+    def _mode_changed(self, mode, save=True):
+        combo = self.app.cfg.hotkey
+        if mode == "toggle":
+            text = (f"یک بار {combo_text(combo)} را بزنید، صحبت کنید و برای پایان دوباره بزنید. "
+                    "برای دیکته‌های طولانی راحت‌تر است.")
+        else:
+            text = f"تا وقتی {combo_text(combo)} را نگه داشته‌اید ضبط ادامه دارد."
+        self.mode_text.setText(text)
+        if save:
+            self.app.update_config(record_mode=mode)
+
+    def _duck_toggled(self, on):
+        self.app.update_config(duck_audio=on)
+        self.duck_level_container.setVisible(on)
+
+    def _autostart(self, on):
+        try:
+            autostart.set_enabled(on)
+        except OSError as e:
+            set_msg(self.key_msg, f"تنظیم اجرای خودکار ممکن نشد: {e}", "Danger")
+
+    def _toggle_capture(self):
+        hk = self.app.hotkey
+        if hk is None:
+            return
+        if hk._capture is not None:
+            hk.end_capture()
+            self._capture_ui(False)
+            return
+        self._capture_ui(True)
+        hk.begin_capture(self.hotkey_captured.emit)
+
+    def _capture_ui(self, on):
+        if on:
+            self.keycaps.set_combo("", placeholder="کلیدهای جدید را فشار دهید…")
+            self.change_key.setText("انصراف")
+            set_msg(self.key_msg, "ترکیب دلخواه را فشار دهید و رها کنید؛ Esc برای انصراف.")
+        else:
+            self.keycaps.set_combo(self.app.cfg.hotkey)
+            self.change_key.setText("تغییر کلید")
+
+    def _hotkey_captured(self, combo):
+        self._capture_ui(False)
+        if combo is None:
+            set_msg(self.key_msg, "")
+            return
+        problem = check_combo(combo)
+        if problem:
+            set_msg(self.key_msg, problem, "Danger")
+        else:
+            self.app.update_config(hotkey=combo)
+            self.keycaps.set_combo(combo)
+            set_msg(self.key_msg, "کلید جدید ذخیره شد.", "Success")
+            self._mode_changed(self.app.cfg.record_mode, save=False)
+
+    # ----- microphone -----
+    def _page_mic(self):
+        page = self._page("میکروفون", "میکروفونی که صدایتان را ضبط می‌کند.")
+        card = Card("انتخاب میکروفون")
+        self.device_combo = QComboBox()
+        self.device_combo.currentIndexChanged.connect(self._device_changed)
+        card.add(self.device_combo)
+        card.add(label("سطح صدا؛ چیزی بگویید تا نوار حرکت کند:", "CardText"))
+        self.meter = LevelMeter()
+        card.add(self.meter)
+        self.mic_msg = label("", "Hint", wrap=True)
+        set_msg(self.mic_msg, "")
+        card.add(self.mic_msg)
+        page.col.addWidget(card)
+
+        card = Card()
+        self.keep_open_switch = ToggleSwitch(self.app.cfg.keep_mic_open)
+        self.keep_open_switch.toggled.connect(lambda on: self.app.update_config(keep_mic_open=on))
+        self.keep_open_row = SettingRow(
+            "میکروفون همیشه آماده",
+            "شروع ضبط بدون تأخیر و بدون جا افتادن اولین کلمه. تا وقتی برنامه باز است، "
+            "ویندوز نشانگر استفاده از میکروفون را نشان می‌دهد؛ صدا جایی ذخیره نمی‌شود.",
+            self.keep_open_switch)
+        card.add(self.keep_open_row)
+        self.bt_note = label("", "Warning", wrap=True)
+        set_msg(self.bt_note, "")
+        card.add(self.bt_note)
+        page.col.addWidget(card)
+
+        card = Card("نوار حرکت نمی‌کند؟", "ممکن است دسترسی برنامه‌ها به میکروفون در تنظیمات حریم خصوصی "
+                                         "ویندوز بسته باشد.")
+        b = QPushButton("باز کردن تنظیمات حریم خصوصی میکروفون")
+        b.setIcon(line_icon("shield", c("text")))
+        b.clicked.connect(lambda: os.startfile("ms-settings:privacy-microphone"))
+        row = QHBoxLayout()
+        row.addWidget(b)
+        row.addStretch(1)
+        card.add(row)
+        page.col.addWidget(card)
+
+        card_calib = Card("کالیبراسیون و انطباق با صدای شما",
+                          "با خواندن چند جمله نمونه، برنامه لحن بیان، وضوح و واژگان تخصصی شما را کالیبره می‌کند.")
+        b_calib = QPushButton("شروع کالیبراسیون هوشمند صدا")
+        b_calib.setObjectName("Primary")
+        b_calib.setIcon(line_icon("bolt", "#ffffff"))
+        b_calib.setCursor(Qt.PointingHandCursor)
+        b_calib.clicked.connect(self._open_calibration)
+        row_cal = QHBoxLayout()
+        row_cal.addWidget(b_calib)
+        row_cal.addStretch(1)
+        card_calib.add(row_cal)
+        page.col.addWidget(card_calib)
+
+        page.col.addStretch(1)
+        return page
+
+    def _refresh_devices(self):
+        combo = self.device_combo
+        combo.blockSignals(True)
+        combo.clear()
+        default = default_input_name()
+        combo.addItem(f"پیش‌فرض ویندوز: {device_label(default) if default else 'پیدا نشد'}", None)
+        for name in input_devices():
+            combo.addItem(device_label(name), name)
+        idx = combo.findData(self.app.cfg.mic_device) if self.app.cfg.mic_device else 0
+        combo.setCurrentIndex(max(idx, 0))
+        combo.blockSignals(False)
+        self._update_mic_notes()
+
+    def _device_changed(self, _):
+        self.app.update_config(mic_device=self.device_combo.currentData())
+        self._update_mic_notes()
+
+    def _open_calibration(self):
+        from .calibration import CalibrationWizard
+        dlg = CalibrationWizard(self.app, self)
+        dlg.calibration_finished.connect(self._on_calibration_finished)
+        dlg.exec()
+
+    def _on_calibration_finished(self, new_keywords):
+        # Refresh vocabulary list widget if it exists
+        if hasattr(self, "vocab_list"):
+            self.vocab_list.clear()
+            for term in self.app.cfg.vocabulary:
+                self.vocab_list.addItem(term)
+
+    def _update_mic_notes(self):
+        name = self.app.cfg.mic_device or default_input_name()
+        set_msg(self.bt_note, "این میکروفون بلوتوثی است؛ برای حفظ کیفیت صدای هدست، فقط هنگام "
+                              "دیکته باز می‌شود." if is_bluetooth(name) else "", "Warning")
+        err = self.app.recorder.error
+        set_msg(self.mic_msg, "میکروفون باز نشد؛ اتصالش را بررسی کنید." if err else "", "Danger")
+
+    # ----- text -----
+    def _page_text(self):
+        page = self._page("متن و املا", "نوشتن متن فقط شکل نوشتاری را درست می‌کند؛ کلمات همان‌هایی "
+                                        "است که گفته‌اید.")
+        cfg = self.app.cfg
+        card = Card("اعداد")
+        seg = SegmentedControl([("persian", "فارسی ۱۲۳"), ("latin", "انگلیسی 123"),
+                                ("keep", "بدون تغییر")], cfg.digits)
+        seg.changed.connect(lambda v: self.app.update_config(digits=v))
+        card.add(seg)
+        page.col.addWidget(card)
+
+        card = Card("روش نوشتن متن")
+        seg = SegmentedControl([("clipboard", "چسباندن"), ("type", "تایپ حرف‌به‌حرف")],
+                               cfg.inject_method)
+        seg.changed.connect(lambda v: self.app.update_config(inject_method=v))
+        card.add(seg)
+        card.add(label("«چسباندن» سریع است و در همه‌جا کار می‌کند و محتوای قبلی کلیپ‌بورد را هم "
+                       "برمی‌گرداند. «تایپ حرف‌به‌حرف» برای برنامه‌هایی است که چسباندن را قبول "
+                       "نمی‌کنند.", "CardText", wrap=True))
+        card.separator()
+        card.add(self._switch_row("فاصله بعد از متن", "تا دیکته‌های پشت سر هم به هم نچسبند.",
+                                  "trailing_space"))
+        page.col.addWidget(card)
+
+        card = Card("واژگان تخصصی من (پرامپت اولیه مدل)",
+                    "نام اشخاص، اصطلاحات رشته، یا کلمات سختی که می‌خواهید مدل همیشه گوش‌به‌زنگ شنیدنشان باشد.")
+        self.vocab_input = QLineEdit()
+        self.vocab_input.setPlaceholderText("کلمه یا عبارت جدید را بنویسید و Enter بزنید…")
+        self.vocab_input.returnPressed.connect(self._add_vocab)
+        row_v = QHBoxLayout()
+        row_v.addWidget(self.vocab_input, 1)
+        add_v_btn = QPushButton("افزودن کلمه")
+        add_v_btn.setIcon(line_icon("plus", c("text")))
+        add_v_btn.setCursor(Qt.PointingHandCursor)
+        add_v_btn.clicked.connect(self._add_vocab)
+        row_v.addWidget(add_v_btn)
+        card.add(row_v)
+
+        self.vocab_list = QListWidget()
+        self.vocab_list.setMinimumHeight(130)
+        for term in cfg.vocabulary:
+            self.vocab_list.addItem(term)
+        card.add(self.vocab_list)
+
+        row_v_actions = QHBoxLayout()
+        rm_v_btn = QPushButton("حذف کلمه‌ی انتخابی")
+        rm_v_btn.setIcon(line_icon("trash", c("danger")))
+        rm_v_btn.clicked.connect(self._remove_vocab)
+        row_v_actions.addWidget(rm_v_btn)
+        row_v_actions.addStretch(1)
+        card.add(row_v_actions)
+        page.col.addWidget(card)
+
+        card = Card("جایگزینی کلمات", "اگر کلمه‌ای همیشه به شکل دیگری نوشته می‌شود، اینجا "
+                                      "املای دلخواهتان را بنویسید.")
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["نوشته‌ی مدل", "جایگزین"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setMinimumHeight(190)
+        for wrong, right in cfg.replacements.items():
+            self._add_row(wrong, right)
+        self.table.itemChanged.connect(self._save_replacements)
+        card.add(self.table)
+        row = QHBoxLayout()
+        add = QPushButton("افزودن")
+        add.setIcon(line_icon("plus", c("text")))
+        add.clicked.connect(lambda: (self._add_row("", ""), self.table.editItem(
+            self.table.item(self.table.rowCount() - 1, 0))))
+        rm = QPushButton("حذف ردیف")
+        rm.setIcon(line_icon("trash", c("danger")))
+        rm.clicked.connect(self._remove_row)
+        row.addWidget(add)
+        row.addWidget(rm)
+        row.addStretch(1)
+        card.add(row)
+        page.col.addWidget(card)
+        page.col.addStretch(1)
+        return page
+
+    def _add_vocab(self):
+        term = self.vocab_input.text().strip()
+        if not term:
+            return
+        # Avoid duplicate additions
+        current = [self.vocab_list.item(i).text() for i in range(self.vocab_list.count())]
+        if term not in current:
+            self.vocab_list.addItem(term)
+            self._save_vocab()
+        self.vocab_input.clear()
+
+    def _remove_vocab(self):
+        row = self.vocab_list.currentRow()
+        if row >= 0:
+            self.vocab_list.takeItem(row)
+            self._save_vocab()
+
+    def _save_vocab(self):
+        terms = [self.vocab_list.item(i).text().strip() for i in range(self.vocab_list.count())]
+        self.app.update_config(vocabulary=[t for t in terms if t])
+
+    def _add_row(self, a, b):
+        self.table.blockSignals(True)
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        self.table.setItem(r, 0, QTableWidgetItem(a))
+        self.table.setItem(r, 1, QTableWidgetItem(b))
+        self.table.blockSignals(False)
+
+    def _remove_row(self):
+        r = self.table.currentRow()
+        if r >= 0:
+            self.table.removeRow(r)
+            self._save_replacements()
+
+    def _save_replacements(self, *_):
+        out = {}
+        for r in range(self.table.rowCount()):
+            a, b = self.table.item(r, 0), self.table.item(r, 1)
+            if a and b and a.text().strip():
+                out[a.text().strip()] = b.text().strip()
+        self.app.update_config(replacements=out)
+
+    # ----- model -----
+    def _page_model(self):
+        page = self._page("مدل گفتار", "مدلی که گفتار را به متن تبدیل می‌کند؛ همه‌چیز روی همین "
+                                       "کامپیوتر انجام می‌شود.")
+        card = Card()
+        self.model_title = label("", "CardTitle")
+        card.add(self.model_title)
+        self.model_desc = label("", "CardText", wrap=True)
+        card.add(self.model_desc)
+        self.model_status = label("", "Hint", wrap=True)
+        set_msg(self.model_status, "")
+        card.add(self.model_status)
+        page.col.addWidget(card)
+
+        card = Card()
+        self.device_combo = QComboBox()
+        self.device_combo.setMinimumWidth(280)
+        self.device_combo.activated.connect(self._device_chosen)
+        card.add(SettingRow("پردازش گفتار روی", "«خودکار» کارت گرافیک جداگانه را به کار می‌برد و اگر "
+                                                "نباشد، پردازنده را.", self.device_combo))
+        self.device_msg = label("", "Hint", wrap=True)
+        card.add(self.device_msg)
+        row = QHBoxLayout()
+        self.device_btn = QPushButton("دانلود اجزای لازم")
+        self.device_btn.setObjectName("Primary")
+        self.device_btn.setIcon(line_icon("download", "#ffffff"))
+        self.device_btn.clicked.connect(lambda: self.app.open_wizard("model"))
+        row.addWidget(self.device_btn)
+        row.addStretch(1)
+        card.add(row)
+        page.col.addWidget(card)
+
+        self.gpu_card = Card(modelstore.GPU_PACK_TITLE,
+                             "کتابخانه‌ی cuBLAS از NVIDIA که تبدیل را روی کارت گرافیک NVIDIA چند برابر "
+                             "سریع‌تر می‌کند. جداگانه دانلود می‌شود، چون متن‌باز نیست.")
+        self.gpu_status = label("", "Hint", wrap=True)
+        self.gpu_card.add(self.gpu_status)
+        page.col.addWidget(self.gpu_card)
+
+        card = Card("مدل‌های نصب‌شده")
+        self.models_box = QVBoxLayout()
+        card.add(self.models_box)
+        self.model_group = QButtonGroup(self)
+        self.model_group.idClicked.connect(self._model_clicked)
+        row = QHBoxLayout()
+        imp = QPushButton("افزودن از فایل…")
+        imp.setIcon(line_icon("plus", c("text")))
+        imp.clicked.connect(self._import_zip)
+        folder = QPushButton("افزودن از پوشه…")
+        folder.setIcon(line_icon("folder", c("text")))
+        folder.clicked.connect(self._import_folder)
+        row.addWidget(imp)
+        row.addWidget(folder)
+        row.addStretch(1)
+        card.add(row)
+        self.import_msg = label("", "Hint", wrap=True)
+        set_msg(self.import_msg, "")
+        card.add(self.import_msg)
+        open_dir = QPushButton("باز کردن پوشه‌ی مدل‌ها")
+        open_dir.setObjectName("Link")
+        open_dir.clicked.connect(lambda: os.startfile(MODELS_DIR))
+        row2 = QHBoxLayout()
+        row2.addWidget(open_dir)
+        row2.addStretch(1)
+        card.add(row2)
+        page.col.addWidget(card)
+
+        card_cat = Card("سایر مدل‌های موجود (دانلود مستقیم)",
+                        "مدل‌های سبک‌تر و بهینه‌شده برای سیستم‌های مختلف؛ با یک کلیک دریافت و فعال می‌شوند.")
+        self.available_box = QVBoxLayout()
+        card_cat.add(self.available_box)
+        page.col.addWidget(card_cat)
+
+        page.col.addStretch(1)
+        return page
+
+    def _refresh_model(self):
+        st = self.app.engine_status()
+        info = modelstore.catalog_entry(st["model"])
+        self.model_title.setText(info.title if info else st["model"])
+        self.model_desc.setText(info.description if info else "")
+        colors = {"ready": "Success", "loading": "Hint", "error": "Danger", "nomodel": "Warning"}
+        set_msg(self.model_status, st["text"], colors.get(st["state"], "Hint"))
+
+        while self.models_box.count():
+            w = self.models_box.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        for b in self.model_group.buttons():
+            self.model_group.removeButton(b)
+        self._model_ids = modelstore.installed_models()
+        for i, mid in enumerate(self._model_ids):
+            entry = modelstore.catalog_entry(mid)
+            rb = QRadioButton(entry.title if entry else mid)
+            rb.setChecked(mid == st["model"])
+            self.model_group.addButton(rb, i)
+            self.models_box.addWidget(rb)
+        if not self._model_ids:
+            self.models_box.addWidget(label("هنوز مدلی نصب نشده است.", "Warning"))
+
+        while self.available_box.count():
+            item = self.available_box.takeAt(0)
+            w = item.widget() if item else None
+            if w:
+                w.deleteLater()
+
+        not_installed = [m for m in modelstore.CATALOG if m.id not in self._model_ids]
+        for cat in not_installed:
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 4, 0, 4)
+            v = QVBoxLayout()
+            v.setSpacing(2)
+            v.addWidget(label(cat.title, "CardTitle"))
+            v.addWidget(label(f"حجم: {modelstore.size_text(cat.size)} · {cat.description}", "CardText", wrap=True))
+            h.addLayout(v, 1)
+            b = QPushButton("دانلود")
+            b.setObjectName("Primary")
+            b.setIcon(line_icon("download", "#ffffff"))
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, mid=cat.id, btn=b: self._download_catalog_model(mid, btn))
+            h.addWidget(b)
+            self.available_box.addWidget(row)
+        if not not_installed:
+            self.available_box.addWidget(label("تمام مدل‌های موجود نصب هستند.", "Hint"))
+
+        self._refresh_device()
+
+    def _download_catalog_model(self, mid, btn):
+        info = modelstore.catalog_entry(mid)
+        if not info:
+            return
+        btn.setEnabled(False)
+        btn.setText("در حال دانلود…")
+        set_msg(self.import_msg, f"در حال دانلود «{info.title}»… لطفاً چند لحظه شکیبا باشید.")
+
+        def work():
+            try:
+                modelstore.download_model(mid, log=print)
+                self.import_finished.emit(mid, None)
+            except Exception as e:
+                self.import_finished.emit(None, f"دانلود ناموفق بود: {e}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _refresh_device(self):
+        device = self.app.cfg.device
+        combo = self.device_combo
+        combo.blockSignals(True)
+        combo.clear()
+        for value, text in devices.options():
+            combo.addItem(text, value)
+        if combo.findData(device) < 0:  # a card that has been removed
+            combo.addItem(f"کارت گرافیک {device[4:]} (پیدا نشد)", device)
+        combo.setCurrentIndex(combo.findData(device))
+        combo.blockSignals(False)
+
+        _, pack = devices.requirements(device)
+        need = devices.needs(device)
+        parts = []
+        if need["model"]:
+            info = modelstore.catalog_entry(need["model"])
+            parts.append(f"«{info.title}» ({modelstore.size_text(info.size)})")
+        if need["gpu_pack"]:
+            parts.append(f"«{modelstore.GPU_PACK_TITLE}» ({modelstore.size_text(modelstore.GPU_SOURCES[0][2])})")
+        set_msg(self.device_msg, f"برای این انتخاب، {' و '.join(parts)} لازم است." if parts else "", "Warning")
+        self.device_btn.setVisible(bool(parts))
+
+        installed = modelstore.gpu_pack_installed()
+        self.gpu_card.setVisible(pack)
+        set_msg(self.gpu_status, "نصب شده است." if installed else "نصب نشده است.",
+                "Success" if installed else "Warning")
+
+    def _device_chosen(self, i):
+        device = self.device_combo.itemData(i)
+        if device and device != self.app.cfg.device:
+            self.app.set_device(device)
+        self._refresh_device()
+
+    def _model_clicked(self, i):
+        mid = self._model_ids[i]
+        if mid != self.app.cfg.model:
+            self.app.switch_model(mid)
+
+    def _import_zip(self):
+        path, _ = QFileDialog.getOpenFileName(self, "انتخاب فایل مدل یا شتاب‌دهنده", "",
+                                              "فایل zip یا مدل (*.zip *.whl *.bin)")
+        if path:
+            self._run_import(path)
+
+    def _import_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "انتخاب پوشه‌ی مدل")
+        if path:
+            self._run_import(path)
+
+    def _run_import(self, path):
+        set_msg(self.import_msg, "در حال کپی مدل… (ممکن است یکی دو دقیقه طول بکشد)")
+
+        def work():
+            try:
+                kind, model_id = modelstore.import_file(path)
+                self.import_finished.emit(model_id or "gpu", None)
+            except Exception as e:
+                self.import_finished.emit(None, str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _import_finished(self, model_id, error):
+        done = "شتاب‌دهنده نصب شد." if model_id == "gpu" else "مدل اضافه شد."
+        set_msg(self.import_msg, error or done, "Danger" if error else "Success")
+        if model_id == "gpu":
+            self.app.switch_model(self.app.cfg.model)  # reload so the GPU is used
+        elif model_id:
+            self.app.switch_model(model_id)
+        self._refresh_model()
+
+    # ----- about -----
+    def _page_about(self):
+        page = self._page("درباره‌ی برنامه", APP_DESCRIPTION)
+        hero = Card()
+        row = QHBoxLayout()
+        logo = QLabel()
+        logo.setPixmap(svg_pixmap(LOGO_SVG, 88, self.devicePixelRatioF()))
+        row.addWidget(logo)
+        texts = QVBoxLayout()
+        texts.addWidget(label(rtl(APP_NAME), "PageTitle"))
+        texts.addWidget(label(APP_TAGLINE, "PageSubtitle"))
+        texts.addWidget(label(f"نسخه‌ی {fa(APP_VERSION)}", "Faint"))
+        row.addLayout(texts, 1)
+        hero.add(row)
+        page.col.addWidget(hero)
+
+        card = Card("معرفی")
+        for text in ABOUT_TEXT:
+            card.add(label(rtl(text), "CardText", wrap=True))
+        page.col.addWidget(card)
+
+        card = Card("طراح و توسعه‌دهنده")
+        card.add(label(AUTHOR, "PageTitle"))
+        links = QHBoxLayout()
+        for icon, text, url in (("globe", WEBSITE_LABEL, WEBSITE), ("github", GITHUB_LABEL, GITHUB)):
+            b = QPushButton(text)
+            b.setIcon(line_icon(icon, c("primary")))
+            b.setCursor(Qt.PointingHandCursor)
+            b.setLayoutDirection(Qt.LeftToRight)
+            b.clicked.connect(lambda _=False, u=url: QDesktopServices.openUrl(QUrl(u)))
+            links.addWidget(b)
+        links.addStretch(1)
+        card.add(links)
+        page.col.addWidget(card)
+
+        card = Card("مجوزها")
+        card.add(label(f"این برنامه متن‌باز است و با مجوز {ltr(LICENSE_NAME)} منتشر شده است. "
+                       "اجزایی که در آن به کار رفته‌اند:", "CardText", wrap=True))
+        for part, who, lic in CREDITS:
+            card.add(label(f"•  {part}: {who}  ·  مجوز {ltr(lic)}", "CardText", wrap=True))
+        b = QPushButton("متن کامل مجوزها")
+        b.setObjectName("Link")
+        b.clicked.connect(lambda: NOTICE_PATH.exists() and os.startfile(NOTICE_PATH))
+        row = QHBoxLayout()
+        row.addWidget(b)
+        row.addStretch(1)
+        card.add(row)
+        page.col.addWidget(card)
+        page.col.addStretch(1)
+        return page
+
+    def restyle(self):
+        """Re-apply icons and colors after a theme change."""
+        for key, icon, _ in PAGES:
+            self.nav_buttons[key].setIcon(nav_icon(icon))
+        self.update()

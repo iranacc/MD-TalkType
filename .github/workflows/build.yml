@@ -1,0 +1,77 @@
+# Builds the Windows installer from source on GitHub's servers, so every released
+# binary can be traced back to this repository (required for SignPath code signing).
+name: Build installer
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      # headers and shader compiler for whisper.cpp's graphics-card (Vulkan) backend;
+      # the hash is the one in winget's manifest for this version
+      - name: Install Vulkan SDK
+        env:
+          VULKAN_VERSION: "1.4.357.0"
+          VULKAN_SHA256: "81F474711E9042F4CD22B31B2F7A8870DB2E428B21586FB43DD80150BE97310D"
+        run: |
+          $exe = "$env:RUNNER_TEMP\vulkansdk.exe"
+          $root = "C:\VulkanSDK\$env:VULKAN_VERSION"
+          curl.exe -fsSL -o $exe "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $env:VULKAN_SHA256) { throw "Vulkan SDK installer: wrong SHA-256" }
+          $p = Start-Process $exe -Wait -PassThru -ArgumentList "--root", $root, "--accept-licenses", "--default-answer", "--confirm-command", "install"
+          if ($p.ExitCode) { throw "Vulkan SDK installer failed ($($p.ExitCode))" }
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=$root"
+
+      - name: Build app and installer
+        run: python tools/build.py
+        env:
+          # MSBuild fails on paths over 260 characters, and the checkout folder
+          # (D:\a\MH-Speech-to-Text\MH-Speech-to-Text) is too deep for whisper.cpp's build
+          WHISPERCPP_BUILD_DIR: ${{ runner.temp }}\wcpp
+
+      - name: Upload unsigned installer
+        id: upload
+        uses: actions/upload-artifact@v6
+        with:
+          name: installer
+          path: build/installer/*.exe
+          if-no-files-found: error
+
+      - name: Release installer
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: build/installer/*.exe
+          generate_release_notes: true
+
+      # After SignPath Foundation approves the project, sign the uploaded artifact:
+      # - uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     organization-id: <from SignPath>
+      #     project-slug: MH-Speech-to-Text
+      #     signing-policy-slug: release-signing
+      #     github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      #     wait-for-completion: true
+      #     output-artifact-directory: build/signed
