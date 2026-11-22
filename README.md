@@ -8,7 +8,7 @@
 
 <p align="center"><img src="website/mh-speech-to-text/img/bar-recording.webp" width="380" alt="نوار ضبط"></p>
 
-**[دانلود برای ویندوز](https://hajloo.ir/mh-speech-to-text/)** · رایگان و متن‌باز
+
 
 ## ویژگی‌ها
 
