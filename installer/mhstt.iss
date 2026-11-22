@@ -11,11 +11,11 @@ AppId={{6F1C8E2A-4B7D-4E53-9A0C-8D2E5B7A31F4}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
-AppPublisher=Mohammad Hajloo
-AppPublisherURL=https://www.hajloo.ir
-AppSupportURL=https://github.com/mhajloo/
-AppUpdatesURL=https://www.hajloo.ir
-AppCopyright=Copyright (c) 2026 Mohammad Hajloo
+AppPublisher=Mohammad Eydimorad
+AppPublisherURL=https://github.com/iranacc/MD-TalkType
+AppSupportURL=https://github.com/iranacc/MD-TalkType
+AppUpdatesURL=https://github.com/iranacc/MD-TalkType
+AppCopyright=Copyright (c) 2026 Mohammad Eydimorad
 ; a normal machine-wide install into Program Files (asks for administrator rights once);
 ; "/CURRENTUSER" on the command line still allows a per-user install without admin rights
 PrivilegesRequired=admin
@@ -40,10 +40,10 @@ LZMAUseSeparateProcess=yes
 OutputDir=..\build\installer
 OutputBaseFilename=MD-TalkType-Setup-{#AppVersion}
 VersionInfoVersion={#AppVersion}
-VersionInfoCompany=Mohammad Hajloo
+VersionInfoCompany=Mohammad Eydimorad
 VersionInfoDescription={#AppName} Setup
 VersionInfoProductName={#AppName}
-VersionInfoCopyright=Copyright (c) 2026 Mohammad Hajloo
+VersionInfoCopyright=Copyright (c) 2026 Mohammad Eydimorad
 #ifdef SIGN
 SignTool=mhsign
 SignedUninstaller=yes

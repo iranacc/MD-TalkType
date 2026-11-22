@@ -14,7 +14,7 @@ VSVersionInfo(
     StringFileInfo([
       StringTable(
         '040904B0',
-        [StringStruct('CompanyName', 'Mohammad Hajloo'),
+        [StringStruct('CompanyName', 'Mohammad Eydimorad'),
          StringStruct('FileDescription', 'MD-TalkType - Persian dictation'),
          StringStruct('FileVersion', '1.2.0'),
          StringStruct('InternalName', 'MD-TalkType'),

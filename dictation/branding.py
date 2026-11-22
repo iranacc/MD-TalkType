@@ -7,12 +7,12 @@ APP_VERSION = "1.2.0"
 APP_ID = "MD.TalkType"   # Windows AppUserModelID (taskbar, notifications)
 APP_DIR_NAME = "MD-TalkType"  # folder name under %APPDATA% / %LOCALAPPDATA%
 
-AUTHOR = "محمد حاجلو"
-AUTHOR_EN = "Mohammad Hajloo"
-WEBSITE = "https://www.hajloo.ir"
-WEBSITE_LABEL = "www.hajloo.ir"
-GITHUB = "https://github.com/mhajloo/"
-GITHUB_LABEL = "github.com/mhajloo"
+AUTHOR = "محمد عیدی مراد"
+AUTHOR_EN = "Mohammad Eydimorad"
+WEBSITE = "https://github.com/iranacc/MD-TalkType"
+WEBSITE_LABEL = "iranacc/MD-TalkType"
+GITHUB = "https://github.com/iranacc"
+GITHUB_LABEL = "github.com/iranacc"
 LICENSE_NAME = "MIT"  # the app itself is open source
 
 # The project's own download server, tried before public mirrors:
