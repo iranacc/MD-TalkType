@@ -37,6 +37,7 @@ class Config:
     sounds: bool = True
     show_overlay: bool = True
     save_history: bool = True
+    check_updates: bool = True        # automatically check for updates on GitHub
     theme: str = "system"             # "system", "light" or "dark"
     first_run_done: bool = False
 

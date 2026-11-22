@@ -63,7 +63,24 @@ class App(QObject):
                                  self.cfg.cancel_key)
         self.hotkey.start()
         threading.Thread(target=preload, daemon=True).start()
+        if self.cfg.check_updates:
+            threading.Thread(target=self._auto_check_updates, daemon=True).start()
         self.load_engine()
+
+    def _auto_check_updates(self):
+        import time
+        time.sleep(4)  # let app initialize first
+        try:
+            from .updater import check_for_updates
+            res = check_for_updates()
+            if res.get("has_update"):
+                latest = res.get("latest_version")
+                self.tray.notify(
+                    "به‌روزرسانی جدید موجود است",
+                    f"نسخه‌ی {latest} از MD-TalkType منتشر شد. برای دریافت به تنظیمات ← درباره‌ی برنامه بروید."
+                )
+        except Exception:
+            pass
 
     def load_engine(self):
         from .devices import any_model_installed

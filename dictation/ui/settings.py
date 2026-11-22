@@ -56,6 +56,7 @@ class SettingsWindow(QWidget):
     hotkey_captured = Signal(object)
     import_finished = Signal(object, object)  # model id, error
     download_progress = Signal(str)
+    update_result_ready = Signal(dict)
 
     def __init__(self, app):
         super().__init__()
@@ -86,6 +87,7 @@ class SettingsWindow(QWidget):
         self.hotkey_captured.connect(self._hotkey_captured)
         self.import_finished.connect(self._import_finished)
         self.download_progress.connect(lambda txt: set_msg(self.import_msg, txt))
+        self.update_result_ready.connect(self._on_update_result)
         app.engine_status_changed.connect(self._refresh_model)
         app.devices_changed.connect(self._refresh_devices)
         self.show_page("general")
@@ -213,6 +215,10 @@ class SettingsWindow(QWidget):
         card.separator()
         card.add(self._switch_row("ذخیره‌ی تاریخچه", "متن‌های دیکته‌شده روی همین کامپیوتر نگه داشته "
                                                     "می‌شوند.", "save_history"))
+        card.separator()
+        card.add(self._switch_row("بررسی خودکار به‌روزرسانی",
+                                  "هنگام باز شدن برنامه، وجود نسخه‌های جدید در گیت‌هاب بررسی می‌شود.",
+                                  "check_updates"))
         page.col.addWidget(card)
 
         card = Card("کاهش صدای خروجی هنگام ضبط",
@@ -760,6 +766,28 @@ class SettingsWindow(QWidget):
         hero.add(row)
         page.col.addWidget(hero)
 
+        card_up = Card("به‌روزرسانی و نسخه‌ها")
+        card_up.add(label(f"نسخه‌ی فعلی برنامه: {fa(APP_VERSION)}", "CardTitle"))
+        self.update_status_msg = label("برای اطمینان از نصب بودن آخرین ویژگی‌ها، دکمه زیر را بزنید.", "CardText", wrap=True)
+        card_up.add(self.update_status_msg)
+
+        row_up = QHBoxLayout()
+        self.btn_check_update = QPushButton("بررسی نسخه جدید")
+        self.btn_check_update.setIcon(line_icon("download", c("primary")))
+        self.btn_check_update.setCursor(Qt.PointingHandCursor)
+        self.btn_check_update.clicked.connect(self._manual_check_update)
+        row_up.addWidget(self.btn_check_update)
+
+        self.btn_download_update = QPushButton("دریافت آخرین نسخه")
+        self.btn_download_update.setObjectName("Primary")
+        self.btn_download_update.setIcon(line_icon("globe", "#ffffff"))
+        self.btn_download_update.setCursor(Qt.PointingHandCursor)
+        self.btn_download_update.setVisible(False)
+        row_up.addWidget(self.btn_download_update)
+        row_up.addStretch(1)
+        card_up.add(row_up)
+        page.col.addWidget(card_up)
+
         card = Card("معرفی")
         for text in ABOUT_TEXT:
             card.add(label(rtl(text), "CardText", wrap=True))
@@ -794,6 +822,46 @@ class SettingsWindow(QWidget):
         page.col.addWidget(card)
         page.col.addStretch(1)
         return page
+
+    def _manual_check_update(self):
+        self.btn_check_update.setEnabled(False)
+        self.btn_check_update.setText("در حال بررسی…")
+        set_msg(self.update_status_msg, "در حال اتصال به سرورهای گیت‌هاب و بررسی نسخه‌ها…")
+
+        def work():
+            from ..updater import check_for_updates
+            res = check_for_updates()
+            self.update_result_ready.emit(res)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_result(self, res):
+        self.btn_check_update.setEnabled(True)
+        self.btn_check_update.setText("بررسی مجدد")
+        if res.get("error"):
+            set_msg(self.update_status_msg, f"عدم برقراری ارتباط با گیت‌هاب: {res['error']}", "Danger")
+            self.btn_download_update.setVisible(False)
+        elif res.get("has_update"):
+            v = res.get("latest_version")
+            set_msg(
+                self.update_status_msg,
+                f"🎉 نسخه‌ی جدید {fa(v)} منتشر شده است! برای دریافت روی دکمه دریافت کلیک کنید.",
+                "Success",
+            )
+            self.btn_download_update.setVisible(True)
+            url = res.get("download_url") or res.get("release_url")
+            try:
+                self.btn_download_update.clicked.disconnect()
+            except Exception:
+                pass
+            self.btn_download_update.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(url)))
+        else:
+            set_msg(
+                self.update_status_msg,
+                f"✅ شما از آخرین نسخه ({fa(APP_VERSION)}) استفاده می‌کنید.",
+                "Success",
+            )
+            self.btn_download_update.setVisible(False)
 
     def restyle(self):
         """Re-apply icons and colors after a theme change."""
