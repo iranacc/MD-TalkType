@@ -3,7 +3,7 @@
 ; Expects the PyInstaller output in build\dist\MD-TalkType.
 
 #define AppName "MD-TalkType"
-#define AppVersion "1.2.0"
+#define AppVersion "1.3.0"
 #define AppExe "MD-TalkType.exe"
 
 [Setup]
