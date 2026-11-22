@@ -51,6 +51,8 @@ CALIBRATION_SENTENCES = [
 
 class CalibrationWizard(QDialog):
     calibration_finished = Signal(list)  # emits list of newly added keywords
+    analysis_finished = Signal(str)      # emits recognized text back to GUI thread
+    analysis_failed = Signal(str)        # emits error string back to GUI thread
 
     def __init__(self, app, parent=None):
         super().__init__(parent)
@@ -65,6 +67,10 @@ class CalibrationWizard(QDialog):
         self.setLayoutDirection(Qt.RightToLeft)
         self.resize(720, 520)
         self.setMinimumSize(640, 480)
+
+        # Thread-safe signal connections
+        self.analysis_finished.connect(self._analyze_result)
+        self.analysis_failed.connect(self._handle_analysis_error)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 24, 24, 24)
@@ -181,13 +187,23 @@ class CalibrationWizard(QDialog):
         if not self.app.engine or not self.app.engine.ready.is_set():
             set_msg(self.status_msg, "مدل گفتار هنوز آماده نیست؛ لطفاً چند ثانیه صبر کنید.", "Warning")
             return
-        try:
-            self.session = Session(self.app.recorder, self.app.engine, self.app.cfg.tail_ms)
-        except MicError:
-            set_msg(self.status_msg, "خطا در دسترسی به میکروفون. اتصال را بررسی کنید.", "Danger")
-            return
+
+        with self.app._lock:
+            if self.app.session is not None:
+                set_msg(self.status_msg, "یک دیکته دیگر در حال انجام است.", "Warning")
+                return
+            try:
+                self.session = Session(self.app.recorder, self.app.engine, self.app.cfg.tail_ms)
+                self.app.session = self.session
+            except MicError:
+                set_msg(self.status_msg, "خطا در دسترسی به میکروفون. اتصال را بررسی کنید.", "Danger")
+                return
+
+        if hasattr(self.app, "volume") and getattr(self.app.cfg, "duck_audio", False):
+            self.app.volume.duck(self.app.cfg.duck_level)
 
         self.recording = True
+        self.btn_next.setEnabled(False)
         self.app.recorder.monitor(True)
         self._timer.start()
 
@@ -201,44 +217,60 @@ class CalibrationWizard(QDialog):
         self.recording = False
         self._timer.stop()
         self.meter.set_level(0.0)
-        self.app.recorder.monitor(False)
+
+        if hasattr(self.app, "volume") and getattr(self.app.cfg, "duck_audio", False):
+            self.app.volume.restore()
 
         self.btn_record.setEnabled(False)
         self.btn_record.setText("در حال تحلیل…")
-        set_msg(self.status_msg, "در حال تحلیل پردازش گفتار…")
+        set_msg(self.status_msg, "در حال تحلیل پردازش گفتار… لطفاً شکیبا باشید.")
 
-        s = self.session
-        self.session = None
+        with self.app._lock:
+            s = self.session
+            self.session = None
+            if self.app.session is s:
+                self.app.session = None
 
         def work():
             try:
                 raw = s.finish()
-                self._analyze_result(raw)
+                self.analysis_finished.emit(raw or "")
             except Exception as e:
-                set_msg(self.status_msg, f"خطا در پردازش صدا: {e}", "Danger")
-                self.btn_record.setEnabled(True)
-                self.btn_record.setText("تلاش مجدد")
+                import traceback
+                traceback.print_exc()
+                self.analysis_failed.emit(str(e))
 
-        threading.Thread(target=work, daemon=True).start()
+        threading.Thread(target=work, name="calibration-asr", daemon=True).start()
+
+    def _handle_analysis_error(self, err_msg):
+        set_msg(self.status_msg, f"خطا در پردازش صدا: {err_msg}", "Danger")
+        self.btn_record.setText("تلاش مجدد")
+        self.btn_record.setIcon(line_icon("mic", "#ffffff"))
+        self.btn_record.setEnabled(True)
+        self.btn_next.setEnabled(True)
 
     def _analyze_result(self, recognized_text):
         target = CALIBRATION_SENTENCES[self.step]
-        # Extract matched and missed keywords
-        recognized_clean = re.sub(r"[^\w\s]", "", recognized_text).strip()
-        matched = []
+        text_clean = (recognized_text or "").strip()
+
+        # Always collect keywords for this sentence so they are learned
         for kw in target["keywords"]:
             self.collected_keywords.add(kw)
-            if kw in recognized_text or kw in recognized_clean:
-                matched.append(kw)
 
-        acc = len(matched) / max(len(target["keywords"]), 1)
-        msg = f"متن شنیده‌شده: «{recognized_text.strip()}»\n"
-        if acc >= 0.75:
-            msg += f"✅ تطبیق عالی بود! ({len(matched)} از {len(target['keywords'])} کلیدواژه شناسایی شد)"
-            color = "Success"
+        if not text_clean:
+            msg = "⚠️ صدایی شنیده نشد یا بسیار ضعیف بود.\nمی‌توانید دوباره تلاش کنید یا به جمله بعدی بروید."
+            color = "Warning"
         else:
-            msg += f"ℹ️ صدا دریافت شد. کلیدواژه‌های این بخش به واژه‌نامه شخصی اضافه شدند."
-            color = "Hint"
+            recognized_clean = re.sub(r"[^\w\s]", "", recognized_text).strip()
+            matched = [kw for kw in target["keywords"] if kw in recognized_text or kw in recognized_clean]
+            acc = len(matched) / max(len(target["keywords"]), 1)
+            msg = f"متن شنیده‌شده: «{text_clean}»\n"
+            if acc >= 0.75:
+                msg += f"✅ تطبیق عالی بود! ({fa(str(len(matched)))} از {fa(str(len(target['keywords'])))} کلیدواژه شناسایی شد)"
+                color = "Success"
+            else:
+                msg += "ℹ️ صدا دریافت شد. کلیدواژه‌های این بخش به واژه‌نامه شخصی اضافه شدند."
+                color = "Hint"
 
         set_msg(self.status_msg, msg, color)
         self.btn_record.setText("تلاش مجدد")
@@ -268,7 +300,30 @@ class CalibrationWizard(QDialog):
         self.btn_close.setObjectName("Primary")
         self.calibration_finished.emit(new_keywords)
 
+    def _cleanup(self):
+        self.recording = False
+        self._timer.stop()
+        if hasattr(self.app, "volume") and getattr(self.app.cfg, "duck_audio", False):
+            self.app.volume.restore()
+        with self.app._lock:
+            if self.session:
+                try:
+                    self.session.cancel()
+                except Exception:
+                    pass
+                if self.app.session is self.session:
+                    self.app.session = None
+                self.session = None
+        self.app.recorder.monitor(False)
+
+    def closeEvent(self, event):
+        self._cleanup()
+        super().closeEvent(event)
+
+    def reject(self):
+        self._cleanup()
+        super().reject()
+
     def _on_close(self):
-        if self.recording and self.session:
-            self.session.cancel()
+        self._cleanup()
         self.close()
