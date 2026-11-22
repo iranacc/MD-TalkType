@@ -69,7 +69,6 @@ python -m venv .venv
 
 ---
 
-این پروژه بر پایه‌ی پروژه ارزشمند MH-Speech to Text (طراحی و توسعه: محمد حاجلو · [www.hajloo.ir](https://www.hajloo.ir)) تحت مجوز MIT بازنشر و توسعه یافته است.
 
 </div>
 
