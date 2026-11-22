@@ -1,11 +1,11 @@
-MH-Speech to Text 1.1.0
-Copyright (c) 2026 Mohammad Hajloo - https://www.hajloo.ir - https://github.com/mhajloo/
+MD-TalkType
+Copyright (c) 2026 MD  - https://github.com/iranacc/
 
-MH-Speech to Text is free and open-source software, released under the MIT License:
+MD-TalkType to Text is free and open-source software, released under the MIT License:
 
 MIT License
 
-Copyright (c) 2026 Mohammad Hajloo
+Copyright (c) 2026 MD
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
