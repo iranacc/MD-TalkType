@@ -282,9 +282,12 @@ class _Meter:
             self.progress(self.done, self.total, rate, self.source)
 
 
-def download(info: ModelInfo, mirrors=None, progress=None, cancel=None, log=print):
+def download(model_or_id, mirrors=None, progress=None, cancel=None, log=print):
     """Download a speech model into the models folder. progress(done, total,
     bytes_per_s, source). Raises DownloadError after every mirror failed, or Cancelled."""
+    info = catalog_entry(model_or_id) if isinstance(model_or_id, str) else model_or_id
+    if not info:
+        raise DownloadError(f"مدل {model_or_id} در کاتالوگ یافت نشد")
     part = MODELS_DIR / f"{info.id}.partial"
     part.mkdir(parents=True, exist_ok=True)
     have = sum(min((part / n).stat().st_size, spec[0]) for n, spec in info.files.items() if (part / n).exists())
@@ -321,6 +324,9 @@ def download(info: ModelInfo, mirrors=None, progress=None, cancel=None, log=prin
     if final.exists():
         shutil.rmtree(final)
     part.rename(final)
+
+
+download_model = download
 
 
 def download_gpu_pack(sources=None, progress=None, cancel=None, log=print):

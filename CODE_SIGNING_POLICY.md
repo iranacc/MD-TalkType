@@ -18,4 +18,4 @@ requested by the user or the person installing or operating it.
 
 Speech recognition runs entirely on the user's computer; audio and dictated text never leave it.
 The only network access is the first-run download of the speech model (and, on PCs with an NVIDIA
-graphics card, NVIDIA's cuBLAS library), which the user starts in the setup wizard.,
+graphics card, NVIDIA's cuBLAS library), which the user starts in the setup wizard.

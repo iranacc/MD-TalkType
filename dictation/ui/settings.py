@@ -55,6 +55,7 @@ def nav_icon(name):
 class SettingsWindow(QWidget):
     hotkey_captured = Signal(object)
     import_finished = Signal(object, object)  # model id, error
+    download_progress = Signal(str)
 
     def __init__(self, app):
         super().__init__()
@@ -84,6 +85,7 @@ class SettingsWindow(QWidget):
         self._meter_timer.timeout.connect(lambda: self.meter.set_level(self.app.recorder.level))
         self.hotkey_captured.connect(self._hotkey_captured)
         self.import_finished.connect(self._import_finished)
+        self.download_progress.connect(lambda txt: set_msg(self.import_msg, txt))
         app.engine_status_changed.connect(self._refresh_model)
         app.devices_changed.connect(self._refresh_devices)
         self.show_page("general")
@@ -655,11 +657,18 @@ class SettingsWindow(QWidget):
             return
         btn.setEnabled(False)
         btn.setText("در حال دانلود…")
-        set_msg(self.import_msg, f"در حال دانلود «{info.title}»… لطفاً چند لحظه شکیبا باشید.")
+        set_msg(self.import_msg, f"شروع دانلود «{info.title}»…")
+
+        def on_prog(done, total, rate, src):
+            pct = int(done / max(total, 1) * 100)
+            mb_s = rate / 1e6
+            self.download_progress.emit(
+                f"در حال دانلود «{info.title}»: {fa(str(pct))}٪ ({fa(f'{mb_s:.1f}')} MB/s)"
+            )
 
         def work():
             try:
-                modelstore.download_model(mid, log=print)
+                modelstore.download(info, progress=on_prog, log=print)
                 self.import_finished.emit(mid, None)
             except Exception as e:
                 self.import_finished.emit(None, f"دانلود ناموفق بود: {e}")
